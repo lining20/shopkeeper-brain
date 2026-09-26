@@ -16,7 +16,7 @@ def node_entry(state: ImportGraphState) -> ImportGraphState:
     """
     节点: 入口节点 (node_entry)
     :param state:
-    :return: satate
+    :return: state
         逻辑: 节点进入运行列表 -> 获取本地文件路径 -> 进行非空判断 -
                 -> 判断文件类型[根据类型更新状态] -> 文件标题状态更新 -
                 -> 节点完成[加载到完成列表] -> 返回状态
