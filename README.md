@@ -2,11 +2,13 @@
 
 面向店铺商品资料的知识库处理项目，目标是将 PDF、Markdown 文档处理为可检索的向量数据，并通过 API 支持商品信息查询与问答。
 
-> 项目处于开发阶段。当前已搭建文档导入流程骨架，实现文件类型判断和通过 MinerU 将 PDF 转为 Markdown；图片处理、文档切分、商品识别、向量化及入库节点尚未实现业务逻辑。暂不具备完整的知识库导入与问答能力。
+> 项目处于开发阶段。当前已搭建文档导入流程骨架，实现文件类型判断、通过 MinerU 将 PDF 转为 Markdown，以及 Markdown 正文读取、图片摘要生成、MinIO 上传和新 Markdown 文件保存。文档切分、商品识别、向量化及入库节点尚未实现业务逻辑。暂不具备完整的知识库导入与问答能力。
 
 ## 当前开发状态
 
 以下状态依据仓库代码整理。“已实现”表示存在具体代码，不代表已经完成实际环境验证或正式发布。
+
+最近核对日期：2026-09-29。本次进展为 `node_md_img` 接入 MinIO 图片上传、Markdown 图片引用替换、新文件保存和任务完成登记。
 
 ### 已实现功能
 
@@ -15,27 +17,31 @@
 | 导入流程编排 | 使用 LangGraph 定义状态、注册节点，并按 PDF / Markdown 类型分流 |
 | 文件入口判断 | 检查输入路径是否为空，识别 `.pdf`、`.md` 后缀，提取文件标题 |
 | PDF 转 Markdown | 调用 MinerU API 申请上传地址、上传文件、轮询解析结果、下载并解压 ZIP、定位和重命名 Markdown 文件 |
+| Markdown 正文读取 | 检查 `md_path` 指向的文件，以 UTF-8 读取正文并写入状态的 `md_content` |
+| 本地图片引用扫描 | 遍历 Markdown 同级 `images/` 目录，按支持的图片后缀过滤，查找每张图片的首个 Markdown 引用并截取前后各最多 100 个字符 |
+| 图片摘要生成 | 将本地图片编码为 Base64，结合文档名、前后文和 `image_summary.prompt` 调用视觉模型，生成按图片文件名索引的摘要字典 |
+| 图片上传与正文替换 | 尝试清理 MinIO 中当前文档前缀下的旧图片，上传被 Markdown 引用的本地图片；将匹配到的图片描述和地址替换为模型摘要及生成的访问地址 |
+| 新 Markdown 文件保存 | 在原文件同目录写入 `<原文件名>_new.md`，并更新状态中的 `md_path`、`md_content`；正常返回时将图片节点登记为已完成 |
 | 日志 | 使用 Loguru 输出控制台与文件日志，记录节点和步骤的耗时及异常 |
 | 任务追踪工具 | 在进程内存中记录任务状态、运行节点、完成节点和结果 |
 | SSE 工具 | 提供会话队列、事件封装和异步生成器，尚未接入 HTTP 路由 |
 | 模型调用工具 | 封装 ChatOpenAI 客户端、BGE-M3 稠密及稀疏向量生成、Reranker 模型加载与 token 计数 |
 | 存储访问工具 | 提供 Milvus 连接与混合检索、MinIO 客户端和存储桶初始化、MongoDB 对话历史读写工具 |
 
-模型与存储工具尚未接入完整的导入、检索或问答业务流程。
+视觉模型客户端、调用限速工具和 MinIO 客户端已接入图片处理节点；向量生成及 Milvus 入库工具尚未接入完整的导入、检索或问答业务流程。
 
 ### 开发中功能
 
-文档导入流程正在搭建。以下节点已注册到 LangGraph，但函数体目前仅返回原状态；具体目标来自节点中的“未来要实现”说明。
+文档导入流程正在搭建。`node_md_img` 已连接正文读取、图片摘要、上传及新文件保存步骤；其余四个节点目前仅返回原状态。下列待办依据节点中的“未来要实现”说明整理。
 
 | 节点 | 待实现内容 |
 | --- | --- |
-| `node_md_img` | 扫描图片链接、上传 MinIO、替换链接，可选生成图片描述 |
 | `node_document_split` | 按 Markdown 标题层级切分，对长段落二次切分，并保留标题路径等元数据 |
 | `node_item_name_recognition` | 调用 LLM 识别商品名称，并写入 `item_name` |
 | `node_bge_embedding` | 为切片生成 Dense / Sparse 向量，整理入库数据 |
 | `node_import_milvus` | 连接 Milvus、按商品名称清理旧数据、批量插入新数据 |
 
-Markdown 输入目前只完成路径识别与分流，尚未实现正文读取。
+PDF 转换结果与直接输入的 Markdown 均进入 `node_md_img` 读取正文。Markdown 同级没有 `images/` 目录或该目录为空时，节点登记完成并直接返回，不生成 `_new.md` 文件。
 
 ### 计划功能
 
@@ -55,11 +61,13 @@ Markdown 输入目前只完成路径识别与分流，尚未实现正文读取�
 文件输入
   └─ 入口判断（已实现）
        ├─ PDF → MinerU 转 Markdown（已实现）
-       ├─ Markdown → 设置文件路径（尚未读取正文）
+       ├─ Markdown → 设置文件路径
        └─ 空路径或不支持的类型 → 结束
 
 PDF / Markdown 分支
-  → 图片处理（待实现）
+  → 读取 Markdown 正文（已实现）
+  → 扫描本地图片引用、生成视觉摘要（已实现；无图片目录或目录为空时跳过）
+  → 尝试清理旧图片、上传 MinIO、替换图片引用并保存新文件（已编写实现）
   → 文档切分（待实现）
   → 商品名称识别（待实现）
   → BGE-M3 向量化（待实现）
@@ -137,6 +145,8 @@ shopkeeper-brain/
 
 如需运行模型或存储工具，还需按模块准备模型文件及 Milvus、MinIO、MongoDB 服务。当前 PDF 转 Markdown 示例不需要这些存储服务或本地模型。
 
+图片处理节点使用远程视觉模型及 MinIO，需配置 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`VL_MODEL`、`LLM_DEFAULT_TEMPERATURE`，以及 MinIO 端点、凭据、桶名和图片目录。完整导入图已引用该节点，导入模块时会读取模型配置；进入图片摘要步骤时会初始化模型客户端。没有 `images/` 目录或目录为空时，图片节点只读取正文，不调用视觉模型或 MinIO。
+
 ### 安装依赖
 
 在项目根目录执行：
@@ -162,11 +172,11 @@ Copy-Item .env.example .env
 | 配置用途 | 环境变量 | 当前使用情况 |
 | --- | --- | --- |
 | PDF 解析 | `MINERU_API_TOKEN`、`MINERU_BASE_URL` | PDF 转 Markdown 节点使用 |
-| 文本及视觉模型 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`LLM_DEFAULT_MODEL`、`VL_MODEL`、`LLM_DEFAULT_TEMPERATURE` | 模型工具及配置使用，尚未接入导入节点 |
+| 文本及视觉模型 | `OPENAI_API_KEY`、`OPENAI_BASE_URL`、`LLM_DEFAULT_MODEL`、`VL_MODEL`、`LLM_DEFAULT_TEMPERATURE` | 视觉模型已接入图片摘要步骤；商品识别等文本模型节点尚未实现 |
 | Embedding | `BGE_M3_PATH`、`BGE_M3`、`BGE_DEVICE`、`BGE_FP16` | 向量工具相关配置 |
 | Reranker | `BGE_RERANKER_LARGE`、`BGE_RERANKER_DEVICE`、`BGE_RERANKER_FP16` | 模型加载及 token 计数工具使用 |
 | Milvus | `MILVUS_URL`、`CHUNKS_COLLECTION`、`ITEM_NAME_COLLECTION`、`ENTITY_NAME_COLLECTION` | 客户端及集合名称配置；实体集合为预留项 |
-| MinIO | `MINIO_ENDPOINT`、`MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`、`MINIO_BUCKET_NAME`、`MINIO_IMG_DIR`、`MINIO_SECURE` | 对象存储相关配置，图片节点尚未接入 |
+| MinIO | `MINIO_ENDPOINT`、`MINIO_ACCESS_KEY`、`MINIO_SECRET_KEY`、`MINIO_BUCKET_NAME`、`MINIO_IMG_DIR`、`MINIO_SECURE` | 图片处理节点清理旧对象、上传图片并生成访问地址时使用 |
 | MongoDB | `MONGO_URL`、`MONGO_DB_NAME` | 对话历史工具使用 |
 | MCP | `MCP_DASHSCOPE_BASE_URL` | 已有配置，尚无搜索业务流程 |
 | 日志 | `LOG_CONSOLE_ENABLE`、`LOG_CONSOLE_LEVEL`、`LOG_FILE_ENABLE`、`LOG_FILE_LEVEL`、`LOG_FILE_RETENTION` | 控制日志输出及保留时间 |
@@ -211,9 +221,38 @@ output/
 
 重复处理同名 PDF 时，代码会删除并重新创建对应的解压子目录。不要在该生成目录中保存需要保留的手工修改。
 
+### Markdown 图片处理示例
+
+先准备 Markdown 文件、需要处理的同级 `images/` 目录，并完成视觉模型及 MinIO 配置。内置示例读取以下路径，可使用前述 PDF 解析产物：
+
+```text
+output/
+└─ hak180产品安全手册/
+   ├─ hak180产品安全手册.md
+   └─ images/
+```
+
+执行：
+
+```powershell
+uv run --frozen python -m processor.import_processor.nodes.node_md_img
+```
+
+当前行为：
+
+- 读取 Markdown 正文并更新 `md_content`。
+- 扫描同级 `images/` 目录的直接子项，支持 `.jpg`、`.jpeg`、`.png`、`.gif`、`.bmp`、`.webp`，后缀匹配不区分大小写。
+- 对正则匹配到引用的图片，结合上下文调用视觉模型生成摘要。请求会发送图片内容及相关文本，并使用限速工具的默认参数：每 60 秒最多 3000 次调用记录；该值是代码配置，不代表模型服务额度。
+- 在 MinIO 中尝试列出并删除以当前文档名称为前缀的旧图片对象，再上传被 Markdown 引用的本地图片。随后将匹配到的 Markdown 图片引用替换为摘要和访问地址。
+- 将处理后的正文写入原文件同目录的 `<原文件名>_new.md`，并将返回状态的 `md_path` 指向新文件，`md_content` 更新为新正文。原 Markdown 文件不被此步骤覆盖。
+
+没有同级 `images/` 目录或该目录为空时，节点直接返回原文件路径和正文，也不会创建 `_new.md`。目录中有文件、但没有图片被 Markdown 引用时，代码仍会进入视觉模型客户端初始化、MinIO 旧对象清理和新文件写入步骤。
+
+该示例会访问外部服务，并尝试删除 MinIO 中当前文档前缀下的旧对象。当前代码先删除后上传；单张图片上传失败时会记录警告并继续，但替换步骤仍可能把对应图片地址写成 `None`。运行前应使用可重建的图片数据。
+
 ### 在 Python 中调用导入流程
 
-安装依赖、准备 `.env` 后，可在项目环境中调用现有接口：
+安装依赖、准备 MinerU、视觉模型和 MinIO 配置后，可在项目环境中调用现有接口。图片节点会根据解析结果是否包含同级 `images/` 目录决定是否处理图片：
 
 ```python
 from processor.import_processor.main_graph import kb_import_app
@@ -230,7 +269,7 @@ final_state = kb_import_app.invoke(initial_state)
 print(final_state.get("md_path"))
 ```
 
-对于 PDF，该示例会执行转换节点，再经过后续占位节点；不会生成文档切片、向量或 Milvus 入库记录。
+对于 PDF，该示例会执行转换和正文读取；存在非空图片目录时，还会尝试摘要生成、MinIO 上传及新文件保存，然后经过后续占位节点。没有图片目录或目录为空时，保留原 Markdown 路径和正文。流程不会生成文档切片、向量或 Milvus 入库记录。
 
 `main_graph.py` 自带的 `__main__` 示例目前仅传入 PDF 文件名，未指向 `doc/`，且没有将 `invoke()` 返回值赋给 `final_state`。从项目根目录直接运行该模块前，需要修正示例路径和结果接收方式。
 
@@ -274,12 +313,16 @@ uv run --frozen python -m processor.import_processor.nodes.node_entry
 
 PDF 转 Markdown 模块内置示例属于真实外部服务调用，需要有效配置，会上传文件并写入输出目录。
 
+Markdown 图片处理模块内置示例依赖实际文件和外部服务配置；存在非空图片目录时会初始化远程视觉模型客户端、清理 MinIO 旧图片并写入新文件。当前没有针对该节点的自动化断言测试。本次文档更新仅依据代码检查，未执行这些外部服务调用。
+
 目前仓库未提供统一测试框架配置或完整业务回归测试。以上命令依据现有文件整理，实际执行结果与验证环境：**待补充**。
 
 ## 已知限制
 
-- 图片处理至 Milvus 入库的五个节点均为占位实现，完整导入链路尚未完成。
-- Markdown 分支尚未读取正文；PDF 转换节点只更新 Markdown 文件路径，没有填充 `md_content`。
+- 图片处理节点已连接主要步骤，但尚无自动化验证；文档切分、商品识别、向量化及 Milvus 入库四个节点仍为占位实现，完整导入链路尚未完成。
+- 图片节点仅扫描 Markdown 同级 `images/` 目录的直接子项，并为每张图片提取首个匹配引用的上下文；未实现任意图片路径或远程图片获取。
+- MinIO 上传前会按前缀尝试删除旧对象。示例 `MINIO_IMG_DIR` 以 `/` 开头，但列举旧对象时会去掉开头的 `/`，上传对象名却保留它；因此旧对象清理可能无法匹配刚上传的图片。同前缀的其他文档对象也可能被纳入清理范围。上传失败会跳过该图片，但 Markdown 替换仍可能写入 `None` 地址。当前生成的访问 URL 固定以 `http://` 开头，与 `MINIO_SECURE=True` 配置不一致。
+- `_new.md` 使用固定文件名，重复处理同一原文件会覆盖之前生成的 `_new.md`。对已生成的 `_new.md` 再运行，会继续生成带 `_new` 后缀的文件。
 - 入口仅识别小写 `.pdf`、`.md` 后缀，且不检查文件是否存在；PDF 文件存在性检查在转换节点执行。
 - 任务与 SSE 队列保存在进程内存中，进程重启后不会保留，也没有多进程共享实现。
 - 当前未提供 Milvus 集合与索引初始化脚本，检索工具依赖外部已准备好的集合结构。
