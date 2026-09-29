@@ -11,14 +11,17 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import StrOutputParser
+from minio.deleteobjects import DeleteObject
 
 from common.config.lm_config import lm_config
+from common.config.minio_config import minio_config
 from common.logging.logger import logger, node_log, step_log
 from processor.import_processor.state import ImportGraphState
+from utils.clients.minio_utils import get_minio_client
 from utils.lm.lm_utils import get_llm_client
 from utils.load_prompt import load_prompt
 from utils.rate_limit_utils import apply_api_rate_limit
-from utils.task_utils import add_running_task
+from utils.task_utils import add_running_task, add_done_task
 
 # MinIO支持的图片格式集合（小写后缀，统一匹配标准）
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
@@ -172,6 +175,99 @@ def step_3_image_summary(image_info_list, root_folder) -> dict[str, str]:
     return image_summary_dict
 
 
+@step_log("step_4_upload_images_get_url")
+def step_4_upload_images_get_url(image_info_list, stem) -> dict[str, str]:
+    """
+    清理当前文档在 MinIO 中的旧图片，上传本地图片并收集访问地址。
+
+    :param image_info_list: 图片信息列表，每项包含图片文件名、本地路径和前后文。
+    :param stem: Markdown 文件名（不含扩展名），用于组成 MinIO 中的图片目录。
+    :return: 以成功上传的图片文件名为键、HTTP 访问地址为值的字典；上传失败的图片不包含在结果中。
+
+    流程：获取 MinIO 客户端 -> 列出并删除当前文档目录下的旧图片
+          -> 遍历图片信息并上传文件 -> 生成访问地址
+          -> 跳过上传失败的图片 -> 返回图片地址字典。
+    """
+    # 获取minio客户端
+    minio_client = get_minio_client()
+    # 查看对应目录下的图片对象
+    objects = minio_client.list_objects(
+        bucket_name=minio_config.bucket_name,
+        prefix=minio_config.minio_img_dir[1:] + "/" + stem,
+        recursive=True,
+    )
+    delete_object_list = [DeleteObject(obj.object_name) for obj in objects]
+    # 删除对应目录下所有图片对象
+    errors = minio_client.remove_objects(
+        bucket_name=minio_config.bucket_name,
+        delete_object_list=delete_object_list
+    )
+    for error in errors:
+        logger.warning(f"删除图片出现问题:{error}")
+
+    # 设置返回结果
+    image_url_dict = {}
+    # 进行图片遍历,重新上传图片
+    for image_name, image_path, _ in image_info_list:
+        try:
+            minio_client.fput_object(
+                bucket_name=minio_config.bucket_name,
+                object_name=minio_config.minio_img_dir + "/" + stem + "/" + image_name,
+                file_path=image_path,
+                content_type=guess_type(image_name)[0],
+            )
+            image_url = (f"http://{minio_config.endpoint}/{minio_config.bucket_name}"
+                         f"{minio_config.minio_img_dir}/{stem}/{image_name}")
+            image_url_dict[image_name] = image_url
+            logger.debug(f"{image_name}已经完成上传,对应的地址为:{image_url}")
+        except Exception as a:
+            logger.warning(f"{image_name}上传失败,跳过,继续下一张图片传递!!")
+
+    return image_url_dict
+
+@step_log("step_5_md_content_replace_image")
+def step_5_md_content_replace_image(md_content, image_summary_dict, image_url_dict)->str:
+    """
+    将 Markdown 图片引用中的描述和地址替换为图片摘要与上传后的地址。
+
+    :param md_content: 待替换图片引用的 Markdown 文本。
+    :param image_summary_dict: 以图片文件名为键、生成的摘要为值的字典。
+    :param image_url_dict: 以图片文件名为键、上传后的访问地址为值的字典。
+    :return: 图片描述和地址替换后的 Markdown 文本。
+
+    流程：遍历图片摘要 -> 按图片名查找访问地址
+          -> 匹配对应的 Markdown 图片引用并替换描述与地址
+          -> 返回更新后的文本。
+    """
+    # 对字典图片遍历
+    for image_name, image_summary in image_summary_dict.items():
+        # 获取图片的网络地址
+        image_url = image_url_dict.get(image_name)
+        # 使用正则表达式替换
+        reg = re.compile(r"\!\[.*?\]\(.*?"+re.escape(image_name)+r".*?\)")
+        md_content = reg.sub(lambda _: f"![{image_summary}]({image_url})", md_content)
+        logger.debug(f"已经完成:{image_name}图片的替换,替换入的描述:{image_summary},替换的地址:{image_url}")
+    return md_content
+
+@step_log("step_6_backup_new_md_content")
+def step_6_backup_new_md_content(md_content_new, md_path_obj)->Path:
+    """
+    将更新后的 Markdown 内容保存为原文件同目录下的新文件。
+
+    :param md_content_new: 替换图片信息后的 Markdown 文本。
+    :param md_path_obj: 原 Markdown 文件的路径对象。
+    :return: 新文件的路径对象，文件名为“原文件名_new.md”。
+
+    流程：根据原文件路径生成带 _new 后缀的文件路径
+          -> 将新内容写入该文件 -> 记录保存位置并返回新文件路径。
+    """
+    # 拼接新的md文档地址
+    md_path_new_obj = md_path_obj.with_name(f"{md_path_obj.stem}_new.md")
+    # 将md文件写入
+    md_path_new_obj.write_text(data=md_content_new,encoding="utf-8")
+    logger.info(f"已经将新的md_content内容备份到:{str(md_path_new_obj)}")
+    return md_path_new_obj
+
 @node_log("node_md_img")
 def node_md_img(state: ImportGraphState) -> ImportGraphState:
     """
@@ -189,8 +285,9 @@ def node_md_img(state: ImportGraphState) -> ImportGraphState:
 
     # 2.从状态中获取数据并校验
     md_path_obj, md_content, images_dir_obj = step_1_validate_and_get_data(state)
-    if (not images_dir_obj) or len(list(images_dir_obj.iterdir())) == 0:
+    if (not images_dir_obj.is_dir()) or len(list(images_dir_obj.iterdir())) == 0:
         logger.info(f"{md_path_obj}对应的md,没有图片内容,无需后续处理,直接跳出!!")
+        add_done_task(state.get("task_id"), "node_md_img")
         return state
 
     # 3.获取图片及上下文信息
@@ -198,11 +295,23 @@ def node_md_img(state: ImportGraphState) -> ImportGraphState:
 
     # 4.调用视觉模型生成摘要
     image_summary_dict = step_3_image_summary(image_info_list, md_path_obj.stem)
+
     # 5.将图片上传到minio服务器
+    image_url_dict = step_4_upload_images_get_url(image_info_list, md_path_obj.stem)
+
     # 6.对md文件中图片信息进行替换
+    md_content_new = step_5_md_content_replace_image(md_content,image_summary_dict, image_url_dict)
+
     # 7.对新的md文件进行磁盘持久化保存
+    md_path_new_obj = step_6_backup_new_md_content(md_content_new, md_path_obj)
+
     # 8.更新状态
+    state["md_content"] = md_content_new
+    state["md_path"]=str(md_path_new_obj)
+
     # 9.将节点加入已完成列表
+    add_done_task(state.get("task_id"), "node_md_img")
+
     return state
 
 
