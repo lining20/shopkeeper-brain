@@ -43,7 +43,7 @@ def step_1_validate_get_data(state) -> tuple[str, str, str]:
     file_title = state.get("file_title")
 
     if not md_content:
-        if (not md_path) or (not md_path.is_file()):
+        if (not md_path) or (not Path(md_path).is_file()):
             logger.error(f"md_content内容为空,md_path也为空或者没有对应的文件,业务无法继续,提前终止!")
             raise ValueError(f"md_content内容为空,md_path也为空或者没有对应的文件,业务无法继续,提前终止!")
         # 从md_path中读取数据
@@ -253,7 +253,7 @@ def _merge_chunk_content(refine_chunks) -> list[dict[str, Any]]:
             if base_chunk.get("parent_title") == next_chunk.get("parent_title"):
                 # 判断两者合并是否大于CHUNK_MAX_SIZE
                 base_content: str = base_chunk.get("content")
-                next_content: str = next_chunk.get("content")
+                next_content: str = next_chunk.get("content")[len(next_chunk.get("parent_title")) + 1:]
                 if not (len(base_content) + len(next_content) > CHUNK_MAX_SIZE):
                     # 不大于,等待下一次
                     base_chunk["content"] = base_content + "\n" + next_content
@@ -268,7 +268,7 @@ def _merge_chunk_content(refine_chunks) -> list[dict[str, Any]]:
             merge_chunks.append(base_chunk)
             base_chunk = next_chunk
 
-    if not base_chunk:
+    if base_chunk:
         merge_chunks.append(base_chunk)
     logger.info(f"完成小于400的chunk的合并,合并后的数量:{len(merge_chunks)}")
 
